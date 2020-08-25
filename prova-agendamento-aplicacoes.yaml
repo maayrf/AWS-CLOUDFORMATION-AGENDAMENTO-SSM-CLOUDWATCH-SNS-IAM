@@ -1,0 +1,584 @@
+---
+Parameters:
+  KeyName:
+    Description: coloque o nome da chave para a EC2, lembre-se de criar a chave com o mesmo nome
+    Type: AWS::EC2::KeyPair::KeyName
+
+Resources:
+####### PERMISSION #######
+#IAM POLICY AND ROLE - FUNCTION LAMBDA PERMISSION EC2
+  StartStopInstancesPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Action:
+          - logs:CreateLogGroup
+          - logs:CreateLogStream
+          - logs:PutLogEvents
+          Resource: arn:aws:logs:*:*:*
+        - Effect: Allow
+          Action:
+          - ec2:Start*
+          - ec2:Stop*
+          - ec2:Describe*
+          - ec2:List*
+          Resource: "*"
+  StartStopInstancesRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Path: /
+      ManagedPolicyArns:
+        - !Ref StartStopInstancesPolicy
+      Tags:
+        -
+          Key: Name
+          Value: StartStopInstancesRole
+
+#IAM POLICY AND ROLE - ACCESS SSM AND LOGS IN EC2
+  PolicySSMLogs:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Action:
+          - ssm:DescribeAssociation
+          - ssm:GetDeployablePatchSnapshotForInstance
+          - ssm:GetDocument
+          - ssm:DescribeDocument
+          - ssm:GetManifest
+          - ssm:GetParameters
+          - ssm:ListAssociations
+          - ssm:ListInstanceAssociations
+          - ssm:PutInventory
+          - ssm:PutComplianceItems
+          - ssm:PutConfigurePackageResult
+          - ssm:UpdateAssociationStatus
+          - ssm:UpdateInstanceAssociationStatus
+          - ssm:UpdateInstanceInformation
+          Resource: "*"
+        - Effect: Allow
+          Action:
+          - ssmmessages:CreateControlChannel
+          - ssmmessages:CreateDataChannel
+          - ssmmessages:OpenControlChannel
+          - ssmmessages:OpenDataChannel
+          Resource: "*"
+        - Effect: Allow
+          Action:
+          - ec2messages:AcknowledgeMessage
+          - ec2messages:DeleteMessage
+          - ec2messages:FailMessage
+          - ec2messages:GetEndpoint
+          - ec2messages:GetMessages
+          - ec2messages:SendReply
+          Resource: "*"
+        - Effect: Allow
+          Action:
+          - cloudwatch:PutMetricData
+          Resource: "*"
+        - Effect: Allow
+          Action:
+          - ec2:DescribeInstanceStatus
+          Resource: "*"
+        - Effect: Allow
+          Action:
+          - ds:CreateComputer
+          - ds:DescribeDirectories
+          Resource: "*"
+        - Effect: Allow
+          Action:
+          - logs:CreateLogGroup
+          - logs:CreateLogStream
+          - logs:DescribeLogGroups
+          - logs:DescribeLogStreams
+          - logs:PutLogEvents
+          Resource: "*"
+        - Effect: Allow
+          Action:
+          - s3:GetBucketLocation
+          - s3:PutObject
+          - s3:GetObject
+          - s3:GetEncryptionConfiguration
+          - s3:AbortMultipartUpload
+          - s3:ListMultipartUploadParts
+          - s3:ListBucket
+          - s3:ListBucketMultipartUploads
+          Resource: "*"
+  RoleSSMLogs:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Path: /
+      ManagedPolicyArns:
+        - !Ref PolicySSMLogs
+      Tags:
+        -
+          Key: Name
+          Value: RoleSSMLogs
+
+
+####### COMPUTING #######
+#SERVERLESS - LAMBDA
+  Agendamento:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: Agendamento
+      Role: !GetAtt StartStopInstancesRole.Arn
+      Code:
+        ZipFile: !Sub |
+          import json
+          import boto3
+          client = boto3.client('ec2')
+          ec2 = boto3.resource('ec2')
+          def handler(event, context):
+              custom_filter = [{
+                  'Name': 'tag:Tarefa',
+                  'Values': ['Agendamento']}]
+              response = client.describe_instances(Filters=custom_filter)
+              instances = ec2.instances.filter(Filters=custom_filter)
+              RunningInstances = [instance.id for instance in instances]
+              StoppedInstances = [instance.id for instance in instances]
+              for instance in response['Reservations'][0]['Instances']:
+                  print(instance['State']['Name'])
+                  if instance['State']['Name'] == 'running':
+                      shuttingUp = ec2.instances.filter(InstanceIds=RunningInstances).stop()
+                      print('Faz o stop')
+                  else:
+                      shuttingDown = ec2.instances.filter(InstanceIds=StoppedInstances).start()
+                      print('faz o start')
+      Description: Invoke a function during stack creation.
+      Handler: index.handler
+      Runtime: python3.7
+      MemorySize: 128
+      Timeout: 30
+
+
+####### SCHEDULE #######
+#CLOUDWATCH - RULE START
+  ScheduledRuleStart: 
+    Type: AWS::Events::Rule
+    Properties: 
+      Description: "ScheduledRule Start"
+      ScheduleExpression: cron(0 11 ? * MON-FRI *) #Iniciar instancias às 8h - GMT tem 3h de diferença do BR.
+      State: "ENABLED"
+      Targets: 
+        - 
+          Arn: 
+            Fn::GetAtt: 
+              - "Agendamento"
+              - "Arn"
+          Id: "TargetFunctionV1"
+  PermissionForEventsToInvokeLambda: 
+    Type: AWS::Lambda::Permission
+    Properties: 
+      FunctionName: !Ref Agendamento
+      Action: "lambda:InvokeFunction"
+      Principal: "events.amazonaws.com"
+      SourceArn: 
+        Fn::GetAtt: 
+          - "ScheduledRuleStart"
+          - "Arn"
+#CLOUDWATCH - RULE STOP
+  ScheduledRuleStop: 
+    Type: AWS::Events::Rule
+    Properties:
+      Description: "ScheduledRule Stop"
+      ScheduleExpression: cron(0 20 ? * MON-FRI *) #Desligar instancias às 17h - GMT tem 3h de diferença do BR.
+      State: "ENABLED"
+      Targets: 
+        - 
+          Arn: 
+            Fn::GetAtt: 
+              - "Agendamento"
+              - "Arn"
+          Id: "TargetFunctionV1"
+  PermissionForEventsToInvokeLambda: 
+    Type: AWS::Lambda::Permission
+    Properties: 
+      FunctionName: !Ref Agendamento
+      Action: "lambda:InvokeFunction"
+      Principal: "events.amazonaws.com"
+      SourceArn: 
+        Fn::GetAtt: 
+          - "ScheduledRuleStop"
+          - "Arn"
+
+####### ALARM #######
+#SNS - NOTIFICATION
+  SnsTopic:
+    Type: 'AWS::SNS::Topic'
+    Properties:
+      Subscription:
+        - Endpoint: example@email.com
+          Protocol: email
+      TopicName: alarm-action
+#CLOUDWATCH - METRIC INSTANCE
+  Ec2InstanceRebootAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmActions:
+      - !Sub arn:aws:automate:${AWS::Region}:ec2:reboot
+      - !Ref SnsTopic
+      AlarmDescription: Reboot instance if its status checks fail.
+      Namespace: AWS/EC2
+      MetricName: CPUUtilization
+      Dimensions:
+        - Name: InstanceId
+          Value: !Ref PubInstance1
+      EvaluationPeriods: 1
+      Period: 60
+      Statistic: Average
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      Threshold: 70
+
+####### COMPUTING #######
+#Atrelar IAMRole a EC2
+  RolePubInstance:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Path: "/"
+      Roles:
+        -
+          Ref: "RoleSSMLogs"
+
+#INSTANCIA EC2 ONE
+##Use the command "ssh -i default.pem ec2-user@ip-other-instance"
+##Look running in the port 80 "netstat -ntpl", is ./root?
+  PubInstance1:
+    Type: AWS::EC2::Instance
+    Properties: 
+      ImageId: ami-02354e95b39ca8dec #ami-a4c7edb ##amzn-ami-hvm-2017.03.1.20170623-x86_64-gp2 
+      InstanceType: t2.micro
+      KeyName: !Ref KeyName
+      IamInstanceProfile: !Ref RolePubInstance
+      UserData:
+        Fn::Base64: |
+          #!/bin/bash
+          yum update -y
+          yum install wget git mysql go awslogs -y
+          service awslogsd start
+          systemctl  enable awslogsd
+          echo "Ola, observe seus logs" > /var/log/messages
+          sed -i '127 s|/var/log/messages|PubInstance1|g' /etc/awslogs/awslogs.conf
+          /usr/libexec/mysql55/mysqladmin -u username password 'thiago123456'           
+          git init
+          cd /home/ec2-user/.ssh
+          git clone https://github.com/maayrf/keypair.git
+          cp keypair/default.pem .
+          chmod 600 default.pem
+          cd /
+          git clone https://github.com/maayrf/wsdaythee.git
+          cd wsdaythee
+          chmod +x -R /wsdaythee/.
+          chmod 700 /wsdaythee/.
+          chmod 700 /wsdaythee/root
+          chmod 700 /wsdaythee/server.ini
+          chmod 777 /wsdaythee/index.html
+          ./root &
+          mysql -h localhost -p test < database.sql
+      NetworkInterfaces:
+        - AssociatePublicIpAddress: 'true'
+          DeviceIndex: '0' 
+          GroupSet:
+          - Ref: ALLSecurityGroup       
+          SubnetId: !Ref PubSubnet1
+      Tags:
+        -
+          Key: Tarefa
+          Value: Agendamento
+        -
+          Key: Name
+          Value: PubInstance1
+
+#PUBLIC INSTANCE TWO
+##Use the command "ssh -i default.pem ec2-user@ip-other-instance"
+##Look running in the port 80 "netstat -ntpl", is ./lookup?
+  PubInstance2:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: ami-02354e95b39ca8dec #ami-a4c7edb ##amzn-ami-hvm-2017.03.1.20170623-x86_64-gp2 
+      InstanceType: t2.micro
+      KeyName: !Ref KeyName
+      IamInstanceProfile: !Ref RolePubInstance
+      UserData:
+        Fn::Base64: |
+          #!/bin/bash
+          yum update -y
+          yum install wget git mysql go awslogs -y
+          service awslogsd start
+          systemctl  enable awslogsd
+          echo "Ola, observe seus logs" > /var/log/messages
+          sed -i '127 s|/var/log/messages|PubInstance2|g' /etc/awslogs/awslogs.conf
+          git init
+          cd /home/ec2-user/.ssh
+          git clone https://github.com/maayrf/keypair.git
+          cp keypair/default.pem .
+          chmod 600 default.pem
+          cd /
+          git clone https://github.com/maayrf/wsdaythee.git
+          cd wsdaythee
+          chmod +x -R /wsdaythee/.
+          chmod 700 /wsdaythee/.
+          chmod 700 /wsdaythee/lookup
+          chmod 700 /wsdaythee/main.ini
+          chmod 777 /wsdaythee/index.html
+          ./lookup &
+          mysql -h localhost -u username -p 'thiago123456' test
+      NetworkInterfaces:
+        - AssociatePublicIpAddress: 'true'
+          DeviceIndex: '0' 
+          GroupSet:
+          - Ref: ALLSecurityGroup       
+          SubnetId: !Ref PubSubnet2
+      Tags:
+        -
+          Key: Tarefa
+          Value: Agendamento
+        -
+          Key: Name
+          Value: PubInstance2
+
+#PUBLIC INSTANCE THREE
+##Use the command "ssh -i default.pem ec2-user@ip-other-instance"
+##Look running in the port 80 "netstat -ntpl", is ./root?
+  PubInstance3:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: ami-02354e95b39ca8dec #ami-a4c7edb ##amzn-ami-hvm-2017.03.1.20170623-x86_64-gp2 
+      InstanceType: t2.micro
+      KeyName: !Ref KeyName
+      IamInstanceProfile: !Ref RolePubInstance
+      UserData:
+        Fn::Base64: |
+          #!/bin/bash
+          yum update -y
+          yum install wget git mysql go awslogs -y
+          service awslogsd start
+          systemctl  enable awslogsd
+          echo "Ola, observe seus logs" > /var/log/messages
+          sed -i '127 s|/var/log/messages|PubInstance3|g' /etc/awslogs/awslogs.conf
+          git init
+          cd /home/ec2-user/.ssh
+          git clone https://github.com/maayrf/keypair.git
+          cp keypair/default.pem .
+          chmod 600 default.pem
+      NetworkInterfaces:
+        - AssociatePublicIpAddress: 'true'
+          DeviceIndex: '0' 
+          GroupSet:
+          - Ref: ALLSecurityGroup       
+          SubnetId: !Ref PubSubnet1
+      Tags:
+        -
+          Key: Tarefa
+          Value: Agendamento
+        -
+          Key: Name
+          Value: Bastion
+
+
+####### NETWORK #######
+#INTERNET GATEWAY
+  myInternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+      - Key: Name
+        Value: IGW
+
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId:
+        Ref: MyVPC
+      InternetGatewayId: !Ref myInternetGateway
+
+  # an elastic IP for our instance
+  PubEIP1:
+    Type: AWS::EC2::EIP
+    Properties:
+      InstanceId: !Ref PubInstance1
+  PubEIP2:
+    Type: AWS::EC2::EIP
+    Properties:
+      InstanceId: !Ref PubInstance2
+  PubEIP3:
+    Type: AWS::EC2::EIP
+    Properties:
+      InstanceId: !Ref PubInstance3
+
+  # our EC2 security group
+  ALLSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId: 
+        Ref: MyVPC
+      GroupName: SG
+      GroupDescription: "Enable HTTP access via port 80 + SSH access"
+      SecurityGroupIngress:
+      - CidrIp: 0.0.0.0/0
+        FromPort: '80'
+        IpProtocol: tcp
+        ToPort: '80'
+      - CidrIp: 0.0.0.0/0
+        FromPort: '22'
+        IpProtocol: tcp
+        ToPort: '22'
+      - CidrIp: 0.0.0.0/0
+        FromPort: '3306'
+        IpProtocol: tcp
+        ToPort: '3306'   
+      Tags:
+        -
+          Key: Name
+          Value: SGZINHO
+
+# My VPC        
+  MyVPC:
+    Type: AWS::EC2::VPC
+    Properties: 
+      CidrBlock: 10.0.0.0/16
+      EnableDnsHostnames: 'true'
+      EnableDnsSupport: 'true'
+      InstanceTenancy: 'default'
+      Tags:
+        -
+          Key: Name
+          Value: VPCZINHA     
+
+# My Subnets
+  PrivSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref MyVPC
+      CidrBlock: 10.0.2.0/24
+      AvailabilityZone: !Select [ 0, !GetAZs ]
+      Tags:
+        -
+          Key: Name
+          Value: 'subnet-priv-a' 
+  PrivSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref MyVPC
+      CidrBlock: 10.0.4.0/24
+      AvailabilityZone: !Select [ 1, !GetAZs ]
+      Tags:
+        -
+          Key: Name
+          Value: 'subnet-priv-b'
+  PubSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref MyVPC
+      CidrBlock: 10.0.1.0/24
+      AvailabilityZone: !Select [ 0, !GetAZs ]
+      Tags:
+        -
+          Key: Name
+          Value: 'subnet-pub-a' 
+  PubSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref MyVPC
+      CidrBlock: 10.0.3.0/24
+      AvailabilityZone: !Select [ 1, !GetAZs ]
+      Tags:
+        -
+          Key: Name
+          Value: 'subnet-pub-b'
+  # Routing Tables
+  # PRIVATE ROUTE
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref MyVPC
+      Tags:
+      - Key: Name
+        Value: RT_Private
+  PrivateRoute1:   # Private route table direciona para o NAT:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NATGateway
+
+#NAT Gateway:
+  NATGateway:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt ElasticIPAddressForNAT.AllocationId
+      SubnetId: !Ref PubSubnet1
+      Tags:
+      - Key: Name
+        Value: 'NAT-GW'
+  ElasticIPAddressForNAT:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: VPC
+
+  # PUBLIC ROUTE TABLE
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref MyVPC
+      Tags:
+      - Key: Name
+        Value: RT_Public
+  PublicRoute1:   # Public route table direciona para o IGW:
+    Type: AWS::EC2::Route
+    DependsOn: AttachGateway
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref myInternetGateway
+  
+  # Attach the public subnets to public route tables,  
+  PublicSubnetARouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    DependsOn: PublicRouteTable
+    Properties:
+      SubnetId: !Ref PubSubnet1
+      RouteTableId: !Ref PublicRouteTable
+  PublicSubnetBRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    DependsOn: PublicRouteTable
+    Properties:
+      SubnetId: !Ref PubSubnet2
+      RouteTableId: !Ref PublicRouteTable
+
+ # Attach the private subnets to private route tables,   
+  PrivateSubnetARouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    DependsOn: PrivateRouteTable
+    Properties:
+      SubnetId: !Ref PrivSubnet1
+      RouteTableId: !Ref PrivateRouteTable
+  PrivateSubnetBRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    DependsOn: PrivateRouteTable
+    Properties:
+      SubnetId: !Ref PrivSubnet2
+      RouteTableId: !Ref PrivateRouteTable

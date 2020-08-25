@@ -1,0 +1,24 @@
+Para subir o template, entre no diretório que ele esta alocado e dê o seguinte comando:
+aws cloudformation create-stack --stack-name prova --template-body file://prova-agendamento-aplicacoes.yaml --parameters ParameterKey=KeyName,ParameterValue=default --capabilities CAPABILITY_IAM
+
+
+Ver se o comando ./lookup esta sendo executado:
+ps aux | grep lookup | more
+
+Comando para que o binário Go rode sem parar, mesmo que você dê Enter e continue fazendo outras coisas:
+./lookup &
+
+Veja o que esta rodando na porta 80:
+netstat -ntpl
+OBS.: 	Se estiver rodando o httpd, dê stop no serviço de httpd; 
+	Se estiver rodando o comando ./lookup você consegue ter acesso ao número de processo dele (normalmente comporto por quatro números);
+
+
+Parar o processo ./lookup (parar de rodar o binário):
+kill 4668
+
+Veja se as informações do server.ini então de acordo com a autenticação:
+OBS.: 	O servidor mysql deve estar como localhot
+
+
+**Para testar coloque o ip de cada EC2 em seu navegador - É só um teste, não aparecerá nada demais, apenas o conteúdo escrito do se index.html!
