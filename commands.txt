@@ -23,7 +23,7 @@ OBS.: 	O servidor mysql deve estar como localhot
 
 **Para testar coloque o ip de cada EC2 em seu navegador - É só um teste, não aparecerá nada demais, apenas o conteúdo escrito do se index.html!
 
-Para testar a utilização da CPU:
+Para testar a utilização da CPU - CLOUDWATCH METRIC AND ALARM:
 sudo amazon-linux-extras install epel -y
 sudo yum install epel-release -y
 sudo yum install stress -y
